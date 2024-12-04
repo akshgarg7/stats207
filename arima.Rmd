@@ -1,0 +1,699 @@
+---
+title: "ARIMA forecasting for crop prices"
+author: "Lian Wang"
+date: "`r Sys.Date()`"
+output: pdf_document
+---
+```{r}
+library(tidyverse)
+library(forecast) # for forecast, tsCV
+library(ggplot2)
+library(tseries) # adf.test
+#library(astsa)
+#library(stats)
+#library(TidyDensity)
+```
+```{r Define some custom functions, include=F}
+alpha <- 0.05
+
+test_bonferroni <- function(d){
+  acf_values <- acf_res$acf[-1]
+  num_lags <- length(acf_values)
+  print(sprintf("Number of significant lags if white noise: %s", num_lags * alpha))
+}
+
+forecast_fun_xreg <- function(x,h, xreg, newxreg){
+  forecast(auto.arima(x,xreg=xreg), xreg=newxreg, h=h)
+}
+
+forecast_fun <- function(x,h){
+  forecast(auto.arima(x))
+}
+
+```
+
+```{r, include=F}
+# Load data and convert to long format
+data <- read.csv("merged_data.csv")
+data$DATE <- as.Date(data$DATE)
+data_long <- data %>%
+  pivot_longer(cols = c(maize, soy, wheat, barley), names_to = "crop", values_to = "value")
+
+# Convert data to ts matrix
+data_ts <- data %>% 
+  column_to_rownames("DATE") %>% 
+  as.matrix()
+
+# Separate ts for each crop
+ts_barley <- ts(data$barley, start = c(1990, 1), frequency = 12)
+ts_maize <- ts(data$maize, start = c(1990, 1), frequency = 12)
+ts_soy <- ts(data$soy, start = c(1990, 1), frequency = 12)
+ts_wheat <- ts(data$wheat, start = c(1990, 1), frequency = 12)
+```
+
+\section{Preliminary}
+We have monthly time series data from January 1990 to October 2024 for the prices of four crops: barley, maize, soy, and wheat. Based on the plot, it is clear that the four time series are correlated, where there are peaks and troughs that are roughly shared between the crops. We are interested in modeling the price of soy, possibly exploiting the correlations with other time series to improve model fit. 
+
+```{r, echo=F}
+# Plot data
+ggplot(data_long, aes(x = DATE, y = value, color = crop)) +
+  geom_line() +
+  labs(title = "Crop prices over time", x = "Date", y = "Price", color = "Crop")
+```
+
+We will fit our models on a training set and then do forecasting and cross-validation on a test set.
+```{r}
+soy_train <- head(ts_soy, round(length(ts_soy) * 0.8))
+soy_test <- tail(ts_soy, length(ts_soy) - length(soy_train))
+autoplot(soy_train) + autolayer(soy_test)
+
+train_length <- length(soy_train)
+test_length <- length(soy_test)
+```
+
+\subsection{Linear detrending}
+The prices for all crops are clearly increasing over time, so we first detrend each time series by fitting a linear model. We will now work with the residuals from the linear model, which have mean 0 by construction. We examine the ACF and PACF plot of the residuals of each series. The ACF plots have a decreasing slope over lag size, suggesting that there is autocorrelation structure in the data that decays over time. This suggests that we can difference the data. The PACF for different lags have smaller autocorrelation, but there is a slight periodic structure, where autocorrelation alternates between positive and negative. This suggests that we should fit a model that can capture seasonality, e.g. a SARIMA model.
+
+
+```{r}
+detrend <- function(ts, crop){
+  par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+
+  # Fit linear trend
+  linear_model <- lm(ts~time(ts))
+  sm <- summary(linear_model)
+  print(sm)
+  plot(ts, ylab=sprintf("%s price", crop), main=sprintf("%s time series",crop))
+  abline(linear_model, col="blue")
+  
+  # Residuals after linear detrending
+  res <- ts - predict(linear_model)
+  plot(res, main="Residuals")
+  acf(res, main="")
+  pacf(res, main="")
+  
+  return(linear_model)
+}
+
+res_barley <- detrend(ts_barley, "Barley")
+res_wheat <- detrend(ts_wheat, "Wheat")
+res_maize <- detrend(ts_maize, "Maize")
+res_soy <- detrend(ts_soy, "Soy")
+#test_bonferroni(res_barley)
+
+#####
+df <- data.frame(time=time(soy_train), value = as.numeric(soy_train))
+linear_model <- lm(soy_train~time(soy_train))
+res_soy_train <- soy_train - linear_model$fitted.values
+linear_pred_soy <- sapply(time(soy_test), function(t){
+  b <- coef(linear_model)[[1]]
+  m <- coef(linear_model)[[2]]
+  m*t + b
+})
+res_soy_test <- soy_test - linear_pred_soy
+
+```
+\subsection{Differencing}
+After first-order differencing the residuals for each of the crops, we no longer see the decreasing slope in the ACF plot. Instead, most of the autocorrelations now are within the confidence bounds for white noise and roughly follow a periodic structure. Thus what remains is to model the periodic structure.
+
+```{r}
+difference <- function(ts, crop, order){
+  diff_ts <- diff(ts, differences = order)
+  
+  par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+  plot(ts, main=sprintf("%s residuals", crop), xlab="Residuals")
+  plot(diff_ts, main=sprintf("After %s month differencing", order), xlab="Differenced residuals")
+  acf(diff_ts, main="")
+  pacf(diff_ts, main="")
+  
+  return(diff_ts)
+}
+
+diff_soy <- difference(res_soy, "Soy", 1)
+diff_wheat <- difference(res_wheat, "Wheat", 1)
+diff_maize <- difference(res_maize, "Maize", 1)
+diff_barley <- difference(res_barley, "Barley", 1)
+
+diff_soy_train <- difference(res_soy_train, "Soy (train)", 1)
+diff_soy_test <- difference(res_soy_test, "Soy (test)", 1)
+
+```
+
+We can also use the Augmented Dickey-Fuller test to test the stationarity of the time series, where we test the null hypothesis that the time series is not stationary, thus a lower p-value is evidence that the time series is stationary. All of the residuals before differencing had $p>0.05$, whereas all of the differenced residuals had $p<0.01$.
+```{r, warning=F}
+paste("P-value, soy residuals:", round(adf.test(res_soy)$p.value,3))
+paste("P-value, wheat residuals:", round(adf.test(res_wheat)$p.value,3))
+paste("P-value, maize residuals:", round(adf.test(res_maize)$p.value,3))
+paste("P-value, barley residuals:", round(adf.test(res_barley)$p.value,3))
+
+paste("P-value, differenced soy residuals:", round(adf.test(diff_soy)$p.value,3))
+paste("P-value, differenced wheat residuals:", round(adf.test(diff_wheat)$p.value,3))
+paste("P-value, differenced maize residuals:", round(adf.test(diff_maize)$p.value,3))
+paste("P-value, differenced barley residuals:", round(adf.test(diff_barley)$p.value,3))
+
+```
+
+While it is not strictly necessary to separately difference the data, as I subsequently use \texttt{auto.arima}, which includes differencing terms, I've found that first-order differencing before fitting an \texttt{auto.arima} improves fit.
+
+\section{SARIMA}
+We will now focus on fitting the time series data for soy prices, specifically the first-order differenced residuals from the linear model. This section fits a SARIMA model to the data.
+#```{r Barley}
+d <- res_barley
+adf.test(d)
+plot(d, main="Barley residuals")
+
+# 1 month differencing
+d <- diff(d, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 1mo differencing")
+acf_res <- acf(d, main="")
+pacf_res <- pacf(d, main="")
+adf.test(d) # Now stationary
+test_bonferroni(acf_res)
+
+d_arima <- auto.arima(d)
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+qqnorm(res_arima)
+qqline(res_arima)
+
+par(mfrow=c(1,1))
+plot(forecast(d_arima, 12), main="1 year forecast")
+
+forecast_fun <- function(x,h){
+  return(forecast(d_arima, 12))
+}
+
+hs <- 1:10
+mses <- sapply(hs, function(h){
+  cv_errors <- tsCV(diff_barley, forecastfunction = forecast_fun, h=h, window=10)
+  mse <- mean(cv_errors^2, na.rm=T)
+})
+#plot(hs, mses, xlab="h", ylab="MSE", main="MSE against h")
+
+h=1
+ws <- seq(1, 50, by=5)
+mses <- sapply(ws, function(w){
+  cv_errors <- tsCV(diff_barley, forecastfunction = forecast_fun, h=h, window=w)
+  mse <- mean(cv_errors^2, na.rm=T)
+})
+#plot(ws, mses, xlab="window size", ylab="MSE", main="MSE against window size")
+
+mse_w1 <- mses[1]
+paste("MSE: ", round(mse_w1,3))
+
+```
+#```{r OUTDATED}
+d <- res_barley
+adf.test(d) # Not yet stationary
+
+# 1 month differencing
+d <- diff(d, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 1mo differencing")
+acf_res <- acf(d, main="")
+pacf_res <- pacf(d, main="")
+adf.test(d) # Now stationary
+test_bonferroni(acf_res)
+
+# 5 year seasonal differencing
+d <- diff(d, lag=60, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 5 yr seasonal differencing")
+acf_res <- acf(d, main="")
+pacf(d, main="")
+adf.test(d)
+test_bonferroni(acf_res)
+
+d_arima <- auto.arima(d)
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+#plot(forecast(d_arima, 36), main="3 year forecast")
+qqnorm(res_arima)
+qqline(res_arima)
+
+```
+#```{r Wheat}
+d <- res_wheat
+adf.test(d)
+plot(d, main="Wheat residuals")
+
+# 1 month differencing
+d <- diff(d, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 1mo differencing")
+acf_res <- acf(d, main="")
+pacf_res <- pacf(d, main="")
+adf.test(d) # Now stationary
+test_bonferroni(acf_res)
+
+d_arima <- auto.arima(d)
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+qqnorm(res_arima)
+qqline(res_arima)
+
+par(mfrow=c(1,1))
+plot(forecast(d_arima, 12), main="1 year forecast")
+
+forecast_fun <- function(x,h){
+  return(forecast(d_arima, 12))
+}
+# 
+# hs <- 1:10
+# mses <- sapply(hs, function(h){
+#   cv_errors <- tsCV(d, forecastfunction = forecast_fun, h=h, window=10)
+#   mse <- mean(cv_errors^2, na.rm=T)
+# })
+#plot(hs, mses, xlab="h", ylab="MSE", main="MSE against h")
+
+h=1
+ws <- seq(1, 50, by=5)
+mses <- sapply(ws, function(w){
+  cv_errors <- tsCV(d, forecastfunction = forecast_fun, h=h, window=w)
+  mse <- mean(cv_errors^2, na.rm=T)
+})
+#plot(ws, mses, xlab="window size", ylab="MSE", main="MSE against window size")
+
+mse_w1 <- mses[1]
+paste("MSE: ", round(mse_w1,3))
+```
+#```{r OUTDATED}
+d <- res_wheat
+adf.test(d) # Not yet stationary
+
+# 1 month differencing
+d <- diff(d, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 1mo differencing")
+acf_res <- acf(d, main="")
+pacf(d, main="")
+adf.test(d) # Now stationary
+test_bonferroni(acf_res)
+
+
+# 15 year seasonal differencing
+d <- diff(d, lag=180, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 15 yr seasonal differencing")
+acf(d, main="")
+pacf(d, main="")
+
+# 5 year seasonal differencing
+d <- diff(d, lag=60, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 5 yr seasonal differencing")
+acf(d, main="")
+pacf(d, main="")
+
+# 1 year seasonal differencing
+d <- diff(d, lag=12, differences = 1)
+plot(d)
+acf(d)
+pacf(d)
+#auto.arima(seasonal_diff)
+
+d_arima <- auto.arima(d)
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+#plot(forecast(d_arima, 36), main="3 year forecast")
+qqnorm(res_arima)
+qqline(res_arima)
+```
+#```{r Maize}
+d <- res_maize
+adf.test(d)
+test_bonferroni(acf_res)
+plot(d, main="Wheat residuals")
+
+# 1 month differencing
+d <- diff(d, differences = 1)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(d, main="After 1mo differencing")
+acf_res <- acf(d, main="")
+pacf_res <- pacf(d, main="")
+adf.test(d) # Now stationary
+
+d_arima <- auto.arima(d)
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+qqnorm(res_arima)
+qqline(res_arima)
+par(mfrow=c(1,1))
+plot(forecast(d_arima, 12), main="1 year forecast")
+
+forecast_fun <- function(x,h){
+  return(forecast(d_arima, 12))
+}
+
+# hs <- 1:10
+# mses <- sapply(hs, function(h){
+#   cv_errors <- tsCV(d, forecastfunction = forecast_fun, h=h, window=10)
+#   mse <- mean(cv_errors^2, na.rm=T)
+# })
+#plot(hs, mses, xlab="h", ylab="MSE", main="MSE against h")
+
+h=1
+ws <- seq(1, 50, by=5)
+mses <- sapply(ws, function(w){
+  cv_errors <- tsCV(d, forecastfunction = forecast_fun, h=h, window=w)
+  mse <- mean(cv_errors^2, na.rm=T)
+})
+#plot(ws, mses, xlab="window size", ylab="MSE", main="MSE against window size")
+
+mse_w1 <- mses[1]
+paste("MSE: ", round(mse_w1,3))
+```
+```{r}```
+
+
+```{r Soy}
+# Forecast next 84 months using same model with same coefficients
+# Fit auto.arima model on training set
+d <- diff_soy_train
+d_arima <- auto.arima(d) 
+summary(d_arima)
+rmse <- sqrt(mean(d_arima$residuals^2))
+paste("AIC:", round(d_arima$aic,3), "; RMSE:", round(rmse,3))
+
+autoplot(d) + 
+  autolayer(d_arima$fitted, series="Fitted values") +
+  ggtitle("AR(1) model, true vs fitted values")
+
+future <- forecast(d_arima, test_length)
+plot(future$mean, main="Predicted future values ")
+autoplot(future)
+e <- future$mean - diff_soy_test
+mse <- mean(e^2, na.rm=T)
+mse
+
+# Forecast next 84 months using same model refitting coefs of AR(1) model
+d <- diff_soy
+forecast_fun <- function(x,h) forecast(Arima(x, order=c(1,0,0)), h=h)
+
+e <- tsCV(d, forecast_fun, h=1)
+mse_all <- mean(e^2, na.rm=T)
+e_test <- e[1+test_length:length(e)]
+mse_test <- mean(e_test^2, na.rm=T)
+mse_test
+
+forecasted_values <- diff_soy - e
+fitted <- window(forecasted_values, end=c(2017,10))
+future <- window(forecasted_values, start=c(2017, 11))
+autoplot(fitted) + autolayer(future)
+
+# Forecast next 84 months refitting auto.arima model
+d <- diff_soy
+forecast_fun <- function(x,h) forecast(auto.arima(x), h=h)
+
+e <- tsCV(d, forecast_fun, h=1)
+mse_all <- mean(e^2, na.rm=T)
+e_test <- e[1+test_length:length(e)]
+mse_test <- mean(e_test^2, na.rm=T)
+
+forecasted_values <- diff_soy - e
+fitted <- window(forecasted_values, end=c(2017,10))
+future <- window(forecasted_values, start=c(2017, 11))
+autoplot(fitted) + autolayer(future)
+
+
+
+
+
+```
+
+```{r Soy}
+d <- diff_soy
+d_arima <- auto.arima(d) 
+summary(d_arima)
+
+plot(d)
+lines(d_arima$fitted, col="darkgreen")
+
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+res_arima <- residuals(d_arima)
+plot(res_arima, main="Residuals of ARIMA model")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+qqnorm(res_arima)
+qqline(res_arima)
+Box.test(res_arima, lag=20, type="Ljung-Box")
+
+hs <- 1:5
+mses_h <- sapply(hs, function(h){
+  e <- tsCV(diff_soy, forecastfunction = forecast_fun, h=h, window=100)
+  mse <- mean(e^2, na.rm=T)
+})
+plot(hs, mses_h, xlab="h", ylab="MSE", main="MSE against h")
+
+ws <- seq(20, 100, by=20)
+mses_w <- sapply(ws, function(w){
+  e <- tsCV(d, forecastfunction = forecast_fun, h=1, window=w)
+  mse <- mean(e^2, na.rm=T)
+})
+plot(ws, mses_w, xlab="window size", ylab="MSE", main="MSE against window size")
+# mse_w1 <- mses[1]
+# paste("MSE: ", round(mse_w1,3))
+
+# e <- tsCV(d, forecastfunction = forecast_fun, h=1, window=100)
+# mse <- mean(e^2, na.rm = T)
+# paste("MSE: ", mse)
+
+
+```
+
+
+\section{SARIMAX}
+Now we want to exploit the correlation between the crop prices in order to predict soy prices. We will again fit a SARIMA model, but this time using the differenced series for the other crops as exogenous variables, i.e. additional predictors. 
+```{r Wheat}
+d_arima <- auto.arima(diff_wheat, xreg=cbind(diff_maize, diff_soy))
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+qqnorm(res_arima)
+qqline(res_arima)
+xreg_future <- matrix(0, nrow=36, ncol=2)
+par(mfrow=c(1,1))
+plot(forecast(d_arima, 36, xreg = xreg_future), main="3 year forecast")
+```
+```{r Barley}
+d_arima <- auto.arima(diff_barley, xreg=cbind(diff_soy, cbind(diff_maize, diff_wheat)))
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+qqnorm(res_arima)
+qqline(res_arima)
+par(mfrow=c(1,1))
+xreg_future <- matrix(0, nrow=36, ncol=3)
+par(mfrow=c(1,1))
+plot(forecast(d_arima, 36, xreg = xreg_future), main="3 year forecast")
+```
+```{r Maize}
+d_arima <- auto.arima(diff_maize, xreg=cbind(diff_barley, cbind(diff_soy, diff_wheat)))
+
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+qqnorm(res_arima)
+qqline(res_arima)
+xreg_future <- matrix(0, nrow=36, ncol=3)
+par(mfrow=c(1,1))
+plot(forecast(d_arima, 36, xreg = xreg_future), main="3 year forecast")
+```
+```{r}
+exog <- cbind(diff_wheat, cbind(diff_barley, diff_maize))
+d_arima <- auto.arima(diff_soy, xreg=exog)
+
+res_arima <- residuals(d_arima)
+summary(d_arima)
+par(mfrow=c(2,2), mar = c(2, 4, 2, 2), oma = c(1, 1, 1, 1))
+plot(res_arima, main="Residuals of ARIMA fit")
+acf <- acf(res_arima, main="")
+pacf <- pacf(res_arima, main="")
+Box.test(res_arima, lag=20, type="Ljung-Box")
+qqnorm(res_arima)
+qqline(res_arima)
+# xreg_future <- matrix(0, nrow=36, ncol=3)
+# par(mfrow=c(1,1))
+# plot(forecast(d_arima, 36, xreg = xreg_future), main="3 year forecast")
+
+forecast_fun <- function(x,h, xreg, newxreg){
+  forecast(auto.arima(x,xreg=xreg), xreg=newxreg, h=h)
+}
+
+# forecast_fun <- function(x,h,xreg,newxreg) {
+#   y <- auto.arima(x, xreg=xreg) %>% 
+#     forecast(xreg=newxreg, h=h)
+#   y$mean <- y$mean[1:h]
+#   return(y)
+# }
+
+m1 <- auto.arima(diff_soy)
+m2 <- auto.arima(diff_soy,xreg=exog)
+summary(m1)
+summary(m2)
+plot(auto.arima(diff_soy) %>% forecast())
+plot(auto.arima(diff_soy, xreg=exog) %>% forecast(xreg=exog))
+
+e <- tsCV(diff_soy, forecastfunction = forecast_fun, h=1, window=100, xreg=exog)
+mse <- mean(e^2, na.rm=T)
+paste("MSE: ", mse)
+
+```
+
+\section{VARIMA}
+```{r}
+library(vars)
+#library(fable)
+
+
+df <- cbind(diff_barley,diff_wheat, diff_maize, diff_soy)
+
+
+lag_select <- VARselect(df, lag.max=10, type="const")
+plot(lag_select$criteria[1,])
+
+p = 5
+model <- VAR(df, p=p)
+summary(model)
+serial.test(model, lags.pt=p, type="PT.asymptotic")
+
+future <- forecast(model, 10)
+future$forecast$diff_soy
+plot(future)
+
+forecast_fun <- function(x,h){
+  model <- VAR(x, p=5)
+  forecast(model)
+}
+
+e <- tsCV(diff_barley, forecastfunction = forecast_fun, h=1, window=100)
+mse <- mean(e^2, na.rm = T)
+paste("MSE: ", mse)
+
+```
+
+\section{Fourier transform}
+```{r}
+
+forecast_fun <- function(x,h, xreg, newxreg){
+  forecast(auto.arima(x,xreg=xreg), xreg=newxreg, h=h)
+}
+
+# Just fourier terms as xreg
+mses_dft <- sapply(1:6, function(K){
+  print(K)
+  dft <- fourier(diff_soy, K=K)
+  
+  model <- auto.arima(diff_soy, xreg=dft)
+  summary(model)
+  e <- tsCV(diff_soy, forecastfunction = forecast_fun, h=1, window=10, xreg=dft)
+  mse <- mean(e^2, na.rm = T)
+
+})
+mses_dft
+
+# Fourier terms + other crops as xreg
+mses_all <- sapply(1:6, function(K){
+  print(K)
+  dft <- fourier(diff_soy, K=K)
+  
+  model <- auto.arima(diff_soy, xreg=cbind(dft, exog))
+  summary(model)
+  e <- tsCV(diff_soy, forecastfunction = forecast_fun, h=1, window=10, xreg=cbind(dft, exog))
+  mse <- mean(e^2, na.rm = T)
+
+})
+mses_all
+
+
+# 
+# fft_result <- fft(diff_wheat)
+# # Extract positive frequencies
+# N <- length(fft_result)
+# freq <- (0:(N / 2 - 1)) / N  # Frequency indices
+# magnitude <- Mod(fft_result[1:(N / 2)])  # Magnitudes of positive frequencies
+# 
+# # Create a data frame for analysis
+# fft_data <- data.frame(freq = freq, magnitude = magnitude)
+# 
+# # Plot frequency spectrum
+# ggplot(fft_data, aes(x = freq, y = magnitude)) +
+#   geom_line(color = "blue") +
+#   labs(title = "Frequency Spectrum of the Crop Time Series",
+#        x = "Frequency",
+#        y = "Magnitude") +
+#   theme_minimal()
+# 
+# f_k1 <- fourier(diff_wheat, K=1)
+# f_k2 <- fourier(diff_wheat, K=2)
+# f_k3 <- fourier(diff_wheat, K=3)
+# 
+# f1 <- function(x,h){
+#   return(forecast(auto.arima(x)))
+# }
+# f2 <- function(x,h){
+#   return(forecast(auto.arima(x, xreg=f_k3), xreg=xreg))
+# }
+# h=1
+# cv_errors <- tsCV(diff_wheat, forecastfunction = f2, h=h, window=30, xreg=f_k3)
+# mse <- mean(cv_errors^2, na.rm=T)
+# mse
+
+############
+# fft_result <- fft(res_arima)
+# # Extract positive frequencies
+# N <- length(fft_result)
+# freq <- (0:(N / 2 - 1)) / N  # Frequency indices
+# magnitude <- Mod(fft_result[1:(N / 2)])  # Magnitudes of positive frequencies
+# 
+# # Create a data frame for analysis
+# fft_data <- data.frame(freq = freq, magnitude = magnitude)
+# 
+# # Plot frequency spectrum
+# ggplot(fft_data, aes(x = freq, y = magnitude)) +
+#   geom_line(color = "blue") +
+#   labs(title = "Frequency Spectrum of the Crop Time Series",
+#        x = "Frequency",
+#        y = "Magnitude") +
+#   theme_minimal()
+
+```
+
