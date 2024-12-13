@@ -4,7 +4,7 @@ author: "Lian Wang"
 date: "`r Sys.Date()`"
 output: pdf_document
 ---
-```{r}
+```{r Load packages, include=F}
 library(tidyverse)
 library(forecast) # for forecast, tsCV
 library(ggplot2)
@@ -24,20 +24,17 @@ test_bonferroni <- function(d){
   print(sprintf("Number of significant lags if white noise: %s", num_lags * alpha))
 }
 
-forecast_fun_xreg <- function(x,h, xreg, newxreg){
-  forecast(auto.arima(x,xreg=xreg), xreg=newxreg, h=h)
-}
-
-forecast_fun <- function(x,h){
-  forecast(auto.arima(x))
-}
-
 ```
 
 ```{r, include=F}
 # Load data and convert to long format
-data <- read.csv("merged_data.csv")
-data$DATE <- as.Date(data$DATE)
+og <- read.csv("merged_data.csv")
+og$DATE <- as.Date(og$DATE)
+
+data <- og
+# Log data to stabilize variance
+#data[2:5] <- log(data[2:5])
+
 data_long <- data %>%
   pivot_longer(cols = c(maize, soy, wheat, barley), names_to = "crop", values_to = "value")
 
@@ -74,7 +71,7 @@ test_length <- length(soy_test)
 
 ```
 
-\section{FINAL}
+\section{Preliminary}
 ```{r Plot all time series, echo=F}
 # Plot data
 ggplot(data_long, aes(x = DATE, y = value, color = crop)) +
@@ -84,183 +81,79 @@ ggplot(data_long, aes(x = DATE, y = value, color = crop)) +
   #scale_color_manual(values=c("dodgerblue","darkorange","forestgreen","#F4A460")) +
   #scale_color_brewer(palette = "RdBu")
   scale_color_paletteer_d("vangogh::CafeDeNuit")
-ggsave(filename = "all_crops.png", width=10, height=6)
-```
-
-```{r Forecast}
-ts <- ts_soy
-ts_train <- soy_train
-ts_test <- soy_test
-
-arima_model <- auto.arima(res_train)
-order <- arima_model$arma[1:3]
-seasonal <- arima_model$arma[c(4,6,7)]
-
-# Fixed model forecasting
-result <- fixed_model_pred(ts_train, ts_test)
-title <- sprintf("ARIMA(1,1,0), fixed; MSE=%s",round(result$mse_test,2))
-result$plot + ggtitle(title)
-
-# One-step ahead forecasting with (1,0,0)(0,1,0)
-order <- c(1,0,0)
-seasonal <- c(0,1,0)
-result <- rolling_model_pred(ts_soy, soy_train, soy_test, order=order, seasonal=seasonal)
-title <- sprintf("ARIMA(1,0,0)(0,1,0), rolling; MSE=%s", round(result$mse_test,2))
-result$plot + ggtitle(title)
-
-# One-step ahead forecasting with (1,1,0)
-order=c(1,1,0)
-result <- rolling_model_pred(ts_soy, soy_train, soy_test, order=order)
-title <- sprintf("ARIMA(1,1,0), rolling; MSE=%s", round(result$mse_test,2))
-result$plot + ggtitle(title)
-
-# One-step ahead forecasting with exogenous variables
-xreg_train <- cbind(res_barley_train, res_wheat_train, res_maize_train)
-r <- (1+train_length):length(res_barley_pred)
-xreg_test <- cbind(res_barley_pred[r], res_wheat_pred[r], res_maize_pred[r])
-xreg <- rbind(xreg_train, xreg_test)
-
-model <- auto.arima(res_train, xreg=xreg_train)
-summary(model)
-order <- c(1,2,0)
-result <- rolling_model_exog_pred(ts_soy, soy_train, soy_test, order=order, xreg=xreg)
-title <- sprintf("ARIMA(1,2,0) with exog, rolling; MSE=%s", round(result$mse_test,2))
-result$plot + ggtitle(title)
-
-order <- c(1,0,2)
-result <- rolling_model_exog_pred(ts_soy, soy_train, soy_test, order=order, xreg=xreg)
-title <- sprintf("ARIMA(1,0,2) with exog, rolling; MSE=%s", round(result$mse_test,2))
-result$plot + ggtitle(title)
-
-# One-step ahead forecasting with 1-lagged exogenous variables (forecasted values)
-xreg_train <- cbind(
-  create_lag(res_barley_train, lag = 1),
-  create_lag(res_wheat_train, lag = 1),
-  create_lag(res_maize_train, lag = 1),
-  create_lag(res_barley_train, lag = 2),
-  create_lag(res_wheat_train, lag = 2),
-  create_lag(res_maize_train, lag = 2)
-)
-xreg_test <- cbind(
-  create_lag(res_barley_pred[r], lag = 1),
-  create_lag(res_wheat_pred[r], lag = 1),
-  create_lag(res_maize_pred[r], lag = 1),
-  create_lag(res_barley_pred[r], lag = 2),
-  create_lag(res_wheat_pred[r], lag = 2),
-  create_lag(res_maize_pred[r], lag = 2)
-)
-xreg <- rbind(xreg_train, xreg_test)
-
-model <- auto.arima(res_train, xreg=xreg_train)
-summary(model)
-order <- c(2,0,0)
-result <- rolling_model_exog_pred(ts_soy, soy_train, soy_test, order=order, xreg=xreg)
-title <- sprintf("ARIMA(2,0,0) with lagged exog, rolling; MSE=%s", round(result$mse_test,2))
-result$plot + ggtitle(title)
-
-# One-step ahead forecasting with 1-lagged exogenous variables (forecasted values)
-xreg_train <- cbind(
-  create_lag(res_barley_train, lag = 1),
-  create_lag(res_wheat_train, lag = 1),
-  create_lag(res_maize_train, lag = 1)
-)
-xreg <- cbind(
-  create_lag(res_barley, lag = 1),
-  create_lag(res_wheat, lag = 1),
-  create_lag(res_maize, lag = 1)
-)
-
-model <- auto.arima(res_train, xreg=xreg_train)
-summary(model)
-order <- c(2,0,0)
-result <- rolling_model_exog_pred(ts_soy, soy_train, soy_test, order=order, xreg=xreg)
-title <- sprintf("ARIMA(2,0,0) with lagged exog, rolling; MSE=%s", round(result$mse_test,2))
-result$plot + ggtitle(title)
-
-ggAcf(diff(res)) +
-  ggtitle("Differenced soy residuals")+
-  theme_minimal()
-
-ggAcf(diff(res_train)) +
-  ggtitle("Differenced soy (train) residuals")+
-  theme_minimal()
-
-ggAcf(diff(res_test)) +
-  ggtitle("Differenced soy (test) residuals")+
-  theme_minimal()
+#ggsave(filename = "plots/all_crops.png", width=10, height=6)
 
 ```
 
+\section{Define functions}
 ```{r Model definitions}
-
-rolling_model_exog_pred <- function(ts, ts_train, ts_test, order, seasonal, xreg){
+fixed_model_pred <- function(ts_train, ts_test){
+  ts_train <- soy_train
+  ts_test <- soy_test
+  
   # Get residuals from linear model fit on training set
   fitted_test <- pred_lm_test(ts_train, ts_test)
-  res_test <- ts_test - fitted_vals_test
+  res_test <- ts_test - fitted_test
   fitted_train <- pred_lm(ts_train)
-  res_train <- ts_train - fitted_vals_train
-  res <- ts(c(res_train, res_test),start=start(res_train), frequency=frequency(res_train))
+  res_train <- ts_train - fitted_train
   
-  forecast_fun <- function(x,h, xreg, newxreg){
-  model <- Arima(x, order=c(1,2,0), xreg=xreg)
-  aic <- summary(model)$aic
-  rmse <- sqrt(mean(model$residuals^2))
-  aics <<- c(aics, aic)
-  rmses <<- c(rmses, rmse)
-  forecast(model,h=h, xreg=newxreg)
-  }
-  
-  e <- tsCV(res, forecastfunction = forecast_fun, h=1, xreg=xreg)
-  #print(mean(e^2, na.rm = T))
-  forecasted_vals <- res - e
-  
-  pred_train <- window(forecasted_vals, end=c(2017,10))
-  pred_test <- window(forecasted_vals, start=c(2017,11))
+  # Fit ARIMA model on training set
+  arima_model <- auto.arima(res_train)
+  print(summary(arima_model))
+  rmse <- sqrt(mean(arima_model$residuals^2))
+  aic <- arima_model$aic
 
-  p_res <- get_mse_and_plot(pred_train=pred_train, 
-                      pred_test=pred_test, 
-                      actual_train=res_train, 
-                      actual_test=res_test)
+  # Forecast using model on test time points
+  forecast <- forecast(arima_model, length(res_test))
+  p_res <- get_mse_and_plot(arima_model$fitted, forecast$mean, res_train, res_test)
+  
+  # Add fitted values back to linear trend and plot
+  p <- get_mse_and_plot(pred_train=arima_model$fitted + fitted_train, 
+                        pred_test=forecast$mean + fitted_test, 
+                        actual_train=ts_train, 
+                        actual_test=ts_test)
+  
+  # Get MSE of the entire ts after exponentiating
+  l <- get_mse_log(pred_train=arima_model$fitted + fitted_train, 
+                   pred_test=forecast$mean + fitted_test,
+                   unlogged=og$soy)
 
-  p <- get_mse_and_plot(pred_train=pred_train + fitted_train, 
-                      pred_test=pred_test + fitted_test, 
-                      actual_train=ts_train, 
-                      actual_test=ts_test)
-    
+  return(list(p=p, log=l))
 }
 
+# ts <- ts_soy
+# ts_train <- soy_train
+# ts_test <- soy_test
+
 rolling_model_pred <- function(ts, ts_train, ts_test, order, seasonal){
+  # 
+  # ts_train <- soy_train
+  # ts_test <- soy_test
+  # ts <- ts_soy
+  # order <- c(1,0,0)
+  # seasonal <- c(0,1,0)
+  
   # Get residuals from linear model fit on training set
   fitted_test <- pred_lm_test(ts_train, ts_test)
-  res_test <- ts_test - fitted_vals_test
+  res_test <- ts_test - fitted_test
   fitted_train <- pred_lm(ts_train)
-  res_train <- ts_train - fitted_vals_train
+  res_train <- ts_train - fitted_train
   res <- ts(c(res_train, res_test),start=start(res_train), frequency=frequency(res_train))
+  
 
   # Define rolling forecasting function
   forecast_fun <- function(x,h){
-    
-    # Remove linear trend
-    # linear_model <- lm(x~time(x))
-    # res_x <- x - predict(linear_model)
-    # m <- linear_model$coefficients[["time(x)"]]
-    # b <- linear_model$coefficients[["(Intercept)"]]
-    # next_t <-  time(x)[length(time(x))] + 1/12
-    # next_val <- m*next_t + b
-
-    # Fit residuals to arima model
-    model <- Arima(x, order=order)
+    model <- Arima(x, order=order, seasonal=seasonal)
     aic <- summary(model)$aic
     rmse <- sqrt(mean(model$residuals^2))
-    aics <<- c(aics, aic)
-    rmses <<- c(rmses, rmse)
-    forecast(model,h=h)
-    # forecasted_vals$mean <- forecasted_vals$mean + next_val
-    # return(forecast_full)
+    #aics <<- c(aics, aic)
+    #rmses <<- c(rmses, rmse)
+    return(forecast(model,h=h))
   }
-  
+
   # Cross validation MSE
   e <- tsCV(res, forecast_fun, h=1)
+  #print(e)
   
   mse_all <- mean(e^2, na.rm = T)
   e_test <- e[(1+test_length):length(e)]
@@ -275,42 +168,69 @@ rolling_model_pred <- function(ts, ts_train, ts_test, order, seasonal){
                         actual_train=res_train, 
                         actual_test=res_test)
 
-  p <- get_mse_and_plot(pred_train=pred_train + fitted_train, 
-                        pred_test=pred_test + fitted_test, 
+  pred_train <- pred_train + fitted_train
+  pred_test <- pred_test+fitted_test
+  # Add fitted values and plot
+  p <- get_mse_and_plot(pred_train=pred_train, 
+                        pred_test=pred_test, 
                         actual_train=ts_train, 
                         actual_test=ts_test)
-  return(p)
+
+  l <- get_mse_log(pred_train=pred_train , 
+                   pred_test=pred_test, 
+                   unlogged=og$soy)
+
+  return(list(p=p, log=l))
 }
 
-fixed_model_pred <- function(ts_train, ts_test){
+rolling_model_exog_pred <- function(ts, ts_train, ts_test, order, seasonal, xreg){
   # Get residuals from linear model fit on training set
   fitted_test <- pred_lm_test(ts_train, ts_test)
-  res_test <- ts_test - fitted_vals_test
+  res_test <- ts_test - fitted_test
   fitted_train <- pred_lm(ts_train)
-  res_train <- ts_train - fitted_vals_train
+  res_train <- ts_train - fitted_train
+  res <- ts(c(res_train, res_test),start=start(res_train), frequency=frequency(res_train))
   
-  # Fit ARIMA model on training set
-  arima_model <- auto.arima(res_train)
-  rmse <- sqrt(mean(arima_model$residuals^2))
-  aic <- model$aic
+  forecast_fun <- function(x,h, xreg, newxreg){
+    model <- Arima(x, order=order, seasonal=seasonal, xreg=xreg)
+    aic <- summary(model)$aic
+    rmse <- sqrt(mean(model$residuals^2))
+    #aics <<- c(aics, aic)
+    #rmses <<- c(rmses, rmse)
+    return(forecast(model,h=h, xreg=newxreg))
+  }
   
-  # Forecast using model on test time points
-  forecast <- forecast(arima_model, length(res_test))
-  p_res <- get_mse_and_plot(arima_model$fitted, forecast$mean, res_train, res_test)
+  e <- tsCV(res, forecastfunction = forecast_fun, h=1, xreg=xreg)
+  forecasted_vals <- res - e
   
-  # Add fitted values back to linear trend and plot
-  p <- get_mse_and_plot(pred_train=arima_model$fitted + fitted_train, 
-                        pred_test=forecast$mean + fitted_test, 
-                        actual_train=ts_train, 
-                        actual_test=ts_test)
+  pred_train <- window(forecasted_vals, end=c(2017,10))
+  pred_test <- window(forecasted_vals, start=c(2017,11))
 
-  return(p)
+  p_res <- get_mse_and_plot(pred_train=pred_train, 
+                      pred_test=pred_test, 
+                      actual_train=res_train, 
+                      actual_test=res_test)
+
+  # Add fitted values and plot
+  pred_train <- pred_train + fitted_train
+  pred_test <- pred_test + fitted_test
+  
+  p <- get_mse_and_plot(pred_train=pred_train,
+                      pred_test=pred_test,
+                      actual_train=ts_train, 
+                      actual_test=ts_test)
+  
+  l <- get_mse_log(pred_train=pred_train , 
+                   pred_test=pred_test, 
+                   unlogged=og$soy)
+
+  return(list(p=p, log=l))
 }
 
 
 ```
 
-```{r}
+```{r Auxiliary functions}
 pred_lm <- function(ts){
   linear_model <- lm(ts~time(ts))
   return(predict(linear_model))
@@ -319,7 +239,7 @@ pred_lm <- function(ts){
 pred_lm_test <- function(ts_train, ts_test){
   df <- data.frame(time=time(ts_train), value=as.numeric(ts_train))
   linear_model <- lm(value~time, df)
-  pred <- sapply(test_time, function(t){
+  pred <- sapply(time(ts_test), function(t){
     b <- coef(linear_model)[[1]]
     m <- coef(linear_model)[[2]]
     m*t + b
@@ -336,7 +256,7 @@ get_mse_and_plot <- function(pred_train, pred_test, actual_train, actual_test){
   
   p <- autoplot(actual, series="actual") +
     autolayer(forecast, series="predicted") +
-    geom_vline(xintercept=time(res_soy_test)[1], linetype="dashed", color="black") +
+    geom_vline(xintercept=time(pred_test)[1], linetype="dashed", color="black") +
     scale_color_manual(values=c("actual"="dodgerblue", "predicted"="darkorange")) +
     labs(y="price") +
     theme_minimal()+
@@ -353,10 +273,196 @@ get_mse_and_plot <- function(pred_train, pred_test, actual_train, actual_test){
   return(list(plot=p, mse_test=mse_test, mse_all=mse_all))
 }
 
+get_mse_log <- function(pred_train, pred_test, unlogged){
+  pred_test <- exp(pred_test)
+  pred_train <- exp(pred_train)
+  og_train <- get_train(unlogged)
+  og_test <- get_test(unlogged, og_train)
+  return(mean(na.omit((og_test-as.vector(pred_test)))^2+na.omit((og_train-as.vector(pred_train)))^2))
+}
+
 create_lag <- function(ts_data, lag = 1) {
   c(rep(NA, lag), ts_data[1:(length(ts_data) - lag)])
 }
 ```
+
+```{r Define forecasting functions}
+forecast_arima <- function(ts, order, seasonal){
+  # Define forcast function
+  forecast_fun <- function(x,h){
+    model <- Arima(x, order=order, seasonal = seasonal)
+    aic <- summary(model)$aic
+    rmse <- sqrt(mean(model$residuals^2))
+    #aics <<- c(aics, aic)
+    #rmses <<- c(rmses, rmse)
+    return(forecast(model,h=h))
+  }
+  
+  # Get MSE of test set and forecasted values
+  e <- tsCV(ts, forecast_fun, h=1)
+  print(e)
+  e_test <- e[1+test_length:length(e)]
+  mse_test <- mean(e_test^2, na.rm=T)
+  forecasted_vals <- ts - e
+  return(list(mse_test, forecasted_vals))
+}
+
+forecast_auto_arima <- function(ts){
+  # Define forcast function
+  forecast_fun <- function(x,h){
+    model <- auto.arima(x)
+    aic <- summary(model)$aic
+    rmse <- sqrt(mean(model$residuals^2))
+    aics <<- c(aics, aic)
+    rmses <<- c(rmses, rmse)
+    forecast(model,h=h)
+  }
+  
+  # Get MSE of test set and forecasted values
+  e <- tsCV(ts, forecast_fun, h=1)
+  e_test <- e[1+test_length:length(e)]
+  mse_test <- mean(e_test^2, na.rm=T)
+  forecasted_vals <- ts - e
+  return(list(mse_test, forecasted_vals))
+}
+
+
+```
+```{r Forecast other crops}
+res_barley <- ts_barley - pred_lm(ts_barley)
+m <- auto.arima(res_barley)
+m
+m$arma
+l <- forecast_arima(res_barley, c(1,2,0), c(0,0,0))
+mse <- l[[1]]
+res_barley_pred <- l[[2]]
+autoplot(res_barley, series="actual") + 
+  autolayer(res_barley_pred, series="forecasted") +
+  ggtitle(sprintf("Barley; ARIMA(1,0,2)(2,0,0), rolling; MSE=%s", round(mse,3)))
+#ggsave("plots/log_barley_arima102200.png")
+
+res_wheat <- ts_wheat - pred_lm(ts_wheat)
+m <- auto.arima(res_wheat)
+m
+m$arma
+l <- forecast_arima(res_wheat, c(1,0,1), c(0,0,0))
+mse <- l[[1]]
+res_wheat_pred <- l[[2]]
+autoplot(res_wheat, series="actual") + 
+  autolayer(res_wheat_pred, series="forecasted") +
+  ggtitle(sprintf("Wheat; ARIMA(1,0,1)(0,0,1), rolling; MSE=%s", round(mse,3)))
+#ggsave("plots/log_wheat_arima101001.png")
+
+res_maize <- ts_maize - pred_lm(ts_maize)
+m <- auto.arima(res_maize)
+m
+m$arma
+l <- forecast_arima(res_maize, c(2,0,0), c(0,0,0))
+mse <- l[[1]]
+res_maize_pred <- l[[2]]
+autoplot(res_maize, series="actual") + 
+  autolayer(res_maize_pred, series="forecasted") +
+  ggtitle(sprintf("Maize; ARIMA(1,1,0), rolling; MSE=%s", round(mse,3)))
+#ggsave("plots/log_maize_arima110.png")
+
+res_soy <- ts_soy - pred_lm(ts_soy)
+m <- auto.arima(res_soy)
+m
+m$arma
+l <- forecast_arima(res_soy, c(1,0,2), c(0,0,0))
+mse <- l[[1]]
+res_soy_pred <- l[[2]]
+
+# Get train and test splits
+res_barley_train <- get_train(res_barley)
+res_barley_test <- get_test(res_barley, res_barley_train)
+res_wheat_train <- get_train(res_wheat)
+res_wheat_test <- get_test(res_wheat, res_wheat_train)
+res_maize_train <- get_train(res_maize)
+res_maize_test <- get_test(res_maize, res_maize_train)
+res_soy_train <- get_train(res_soy)
+res_soy_test <- get_test(res_soy, res_soy_train)
+```
+
+\section{Forecast soy}
+```{r Forecast soy}
+# order <- arima_model$arma[1:3]
+# seasonal <- arima_model$arma[c(4,6,7)]
+m <- auto.arima(soy_train)
+summary(m) # (1,0,0)(0,1,0) for non logged model
+
+# Fixed model forecasting
+result <- fixed_model_pred(soy_train, soy_test)
+title <- sprintf("ARIMA(1,1,0), fixed; MSE=%s",round(result$p$mse_test,2))
+result$p$plot + ggtitle(title)
+#ggsave("plots/arima110_fixed.png", dpi=300, width=7.5, height=5)
+
+# One-step ahead forecasting with (1,0,0)(0,1,0)
+order <- c(1,1,0)
+seasonal <- c(0,0,0)
+result <- rolling_model_pred(ts_soy, soy_train, soy_test, order=order, seasonal=seasonal)
+title <- sprintf("ARIMA(1,1,0), rolling; MSE=%s", round(result$p$mse_test,2))
+result$p$plot + ggtitle(title)
+#ggsave("plots/arima110.png", dpi=300, width=7.5, height=5)
+
+# One-step ahead forecasting with exogenous variables
+xreg_train <- cbind(res_barley_train, res_wheat_train, res_maize_train)
+r <- (1+train_length):length(res_barley_pred)
+xreg_test <- cbind(res_barley_pred[r], res_wheat_pred[r], res_maize_pred[r])
+xreg <- rbind(xreg_train, xreg_test)
+
+model <- auto.arima(res_train, xreg=xreg_train)
+summary(model)
+order <- c(1,0,2)
+seasonal <- c(0,0,1)
+result <- rolling_model_exog_pred(ts_soy, soy_train, soy_test, order=order, seasonal=seasonal, xreg=xreg)
+title <- sprintf("ARIMA(1,0,2)(0,0,1) with exog, rolling; MSE=%s", round(result$log,2))
+result$p$plot + ggtitle(title)
+#ggsave("plots/log_arima102001_exog.png", dpi=300, width=7.5, height=5)
+
+# One-step ahead forecasting with 1- and 2-lagged exogenous variables (forecasted values)
+xreg_train <- cbind(
+  create_lag(res_maize_train, lag = 1),
+  create_lag(res_barley_train, lag = 1),
+  create_lag(res_wheat_train, lag = 1)
+)
+xreg_test <- cbind(
+  create_lag(res_maize_test, lag = 1),
+  create_lag(res_barley_test, lag = 1),
+  create_lag(res_wheat_test, lag = 1)
+  # create_lag(res_barley_pred[r], lag = 1),
+  # create_lag(res_wheat_pred[r], lag = 1),
+  # create_lag(res_maize_pred[r], lag = 1),
+  # create_lag(res_barley_pred[r], lag = 2),
+  # create_lag(res_wheat_pred[r], lag = 2),
+  # create_lag(res_maize_pred[r], lag = 2)
+)
+xreg <- rbind(xreg_train, xreg_test)
+
+model <- auto.arima(res_train, xreg=xreg_train)
+summary(model)
+order <- c(2,0,0)
+seasonal <- c(0,0,0)
+result <- rolling_model_exog_pred(ts_soy, soy_train, soy_test, order=order, seasonal=seasonal, xreg=xreg)
+title <- sprintf("ARIMA(2,1,0) with current time horizon, rolling; MSE=%s", round(result$p$mse_test,2))
+result$p$plot + ggtitle(title)
+#ggsave("plots/arima200_lag1_actual.png", dpi=300, height=5, width=7.5)
+
+######
+ggAcf(diff(res)) +
+  ggtitle("Differenced soy residuals")+
+  theme_minimal()
+
+ggAcf(diff(res_train)) +
+  ggtitle("Differenced soy (train) residuals")+
+  theme_minimal()
+
+ggAcf(diff(res_test)) +
+  ggtitle("Differenced soy (test) residuals")+
+  theme_minimal()
+
+```
+
 
 \section{Preliminary}
 We have monthly time series data from January 1990 to October 2024 for the prices of four crops: barley, maize, soy, and wheat. Based on the plot, it is clear that the four time series are correlated, where there are peaks and troughs that are roughly shared between the crops. We are interested in modeling the price of soy, possibly exploiting the correlations with other time series to improve model fit. 
